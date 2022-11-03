@@ -36,6 +36,8 @@
 // dbt.h is lowercase here, as a cross-compile on linux with mingw-w64
 // expects lowercase, and a native compile on windows, whether via msvc
 // or mingw-w64 addresses files in a case insensitive manner.
+#include <cassert>
+#include <cmath>
 #include <dbt.h>
 #include <ostream>
 #include <vector>
@@ -54,6 +56,14 @@
 #define MAPVK_VK_TO_VSC (0)
 #endif
 
+// DPI awareness events are only defined when WINVER is high enough
+#ifndef WM_DPICHANGED
+#define WM_DPICHANGED 0x02E0
+#endif
+#ifndef WM_GETDPISCALEDSIZE
+#define WM_GETDPISCALEDSIZE 0x02E4
+#endif
+
 namespace
 {
 unsigned int               windowCount      = 0; // Windows owned by SFML
@@ -62,63 +72,6 @@ const wchar_t*             className        = L"SFML_Window";
 sf::priv::WindowImplWin32* fullscreenWindow = nullptr;
 
 const GUID GUID_DEVINTERFACE_HID = {0x4d1e55b2, 0xf16f, 0x11cf, {0x88, 0xcb, 0x00, 0x11, 0x11, 0x00, 0x00, 0x30}};
-
-void setProcessDpiAware()
-{
-    // Try SetProcessDpiAwareness first
-    HINSTANCE shCoreDll = LoadLibrary(L"Shcore.dll");
-
-    if (shCoreDll)
-    {
-        enum ProcessDpiAwareness
-        {
-            ProcessDpiUnaware         = 0,
-            ProcessSystemDpiAware     = 1,
-            ProcessPerMonitorDpiAware = 2
-        };
-
-        using SetProcessDpiAwarenessFuncType = HRESULT(WINAPI*)(ProcessDpiAwareness);
-        auto SetProcessDpiAwarenessFunc      = reinterpret_cast<SetProcessDpiAwarenessFuncType>(
-            reinterpret_cast<void*>(GetProcAddress(shCoreDll, "SetProcessDpiAwareness")));
-
-        if (SetProcessDpiAwarenessFunc)
-        {
-            // We only check for E_INVALIDARG because we would get
-            // E_ACCESSDENIED if the DPI was already set previously
-            // and S_OK means the call was successful
-            if (SetProcessDpiAwarenessFunc(ProcessSystemDpiAware) == E_INVALIDARG)
-            {
-                sf::err() << "Failed to set process DPI awareness" << std::endl;
-            }
-            else
-            {
-                FreeLibrary(shCoreDll);
-                return;
-            }
-        }
-
-        FreeLibrary(shCoreDll);
-    }
-
-    // Fall back to SetProcessDPIAware if SetProcessDpiAwareness
-    // is not available on this system
-    HINSTANCE user32Dll = LoadLibrary(L"user32.dll");
-
-    if (user32Dll)
-    {
-        using SetProcessDPIAwareFuncType = BOOL(WINAPI*)();
-        auto SetProcessDPIAwareFunc      = reinterpret_cast<SetProcessDPIAwareFuncType>(
-            reinterpret_cast<void*>(GetProcAddress(user32Dll, "SetProcessDPIAware")));
-
-        if (SetProcessDPIAwareFunc)
-        {
-            if (!SetProcessDPIAwareFunc())
-                sf::err() << "Failed to set process DPI awareness" << std::endl;
-        }
-
-        FreeLibrary(user32Dll);
-    }
-}
 } // namespace
 
 namespace sf
@@ -138,7 +91,14 @@ m_resizing(false),
 m_surrogate(0),
 m_mouseInside(false),
 m_fullscreen(false),
-m_cursorGrabbed(false)
+m_cursorGrabbed(false),
+m_scaleWithDpi(false),
+m_dpiScale(1),
+m_user32Dll(nullptr),
+m_shCoreDll(nullptr),
+m_adjustWindowRectExForDpiFunc(nullptr),
+m_getDpiForWindowFunc(nullptr),
+m_getDpiForMonitorFunc(nullptr)
 {
     // Set that this process is DPI aware and can handle DPI scaling
     setProcessDpiAware();
@@ -171,7 +131,14 @@ m_resizing(false),
 m_surrogate(0),
 m_mouseInside(false),
 m_fullscreen((style & Style::Fullscreen) != 0),
-m_cursorGrabbed(m_fullscreen)
+m_cursorGrabbed(m_fullscreen),
+m_scaleWithDpi(mode.scaleWithDpi),
+m_dpiScale(1),
+m_user32Dll(nullptr),
+m_shCoreDll(nullptr),
+m_adjustWindowRectExForDpiFunc(nullptr),
+m_getDpiForWindowFunc(nullptr),
+m_getDpiForMonitorFunc(nullptr)
 {
     // Set that this process is DPI aware and can handle DPI scaling
     setProcessDpiAware();
@@ -204,11 +171,62 @@ m_cursorGrabbed(m_fullscreen)
             win32Style |= WS_SYSMENU;
     }
 
-    // In windowed mode, adjust width and height so that window will have the requested client area
+    Vector2u scaledSize = mode.size;
     if (!m_fullscreen)
     {
+        // Calculate the correct window size when High DPI support is is enabled
+        UINT dpi = 96;
+        if (m_scaleWithDpi)
+        {
+            RECT unscaledWindowRect;
+            unscaledWindowRect.left   = left;
+            unscaledWindowRect.top    = top;
+            unscaledWindowRect.right  = left + width;
+            unscaledWindowRect.bottom = top + height;
+
+            if (m_getDpiForMonitorFunc && ((m_dpiAwareness == DpiAwareness::PerMonitorAwareV1) ||
+                                           (m_dpiAwareness == DpiAwareness::PerMonitorAwareV2)))
+            {
+                // We first need to figure out on which monitor the window will appear,
+                // as each monitor can have its own scaling.
+                const HMONITOR monitor = MonitorFromRect(&unscaledWindowRect, MONITOR_DEFAULTTONEAREST);
+
+                UINT dpiX;
+                UINT dpiY;
+                if (m_getDpiForMonitorFunc(monitor, MDTEffectiveDpi, &dpiX, &dpiY) == S_OK)
+                    dpi = dpiY; // dpiX and dpiY are always identical
+                else
+                    dpi = GetSystemDPI();
+            }
+            else if (m_dpiAwareness == DpiAwareness::SystemAware)
+            {
+                dpi = GetSystemDPI();
+            }
+
+            m_dpiScale             = static_cast<float>(dpi) / 96.f;
+            const int scaledWidth  = static_cast<int>(std::round(width * m_dpiScale));
+            const int scaledHeight = static_cast<int>(std::round(height * m_dpiScale));
+
+            left -= (scaledWidth - width) / 2;
+            top -= (scaledHeight - height) / 2;
+            width  = scaledWidth;
+            height = scaledHeight;
+        }
+
+        scaledSize.x = static_cast<unsigned int>(width);
+        scaledSize.y = static_cast<unsigned int>(height);
+        m_lastSize   = scaledSize;
+
+        // In windowed mode, adjust width and height so that window will have the requested client area.
+        // When DPI awareness is set to Per Monitor V2 then we also need to take the scaling of the title bar
+        // into account. Simply calling AdjustWindowRect actually appears to be enough even when using
+        // Per Monitor V2, but this is probably only true because the window is placed on the main monitor.
         RECT rectangle = {0, 0, width, height};
-        AdjustWindowRect(&rectangle, win32Style, false);
+        if ((m_dpiAwareness == DpiAwareness::PerMonitorAwareV2) && m_adjustWindowRectExForDpiFunc)
+            m_adjustWindowRectExForDpiFunc(&rectangle, win32Style, false, 0, dpi);
+        else
+            AdjustWindowRect(&rectangle, win32Style, false);
+
         width  = rectangle.right - rectangle.left;
         height = rectangle.bottom - rectangle.top;
     }
@@ -242,7 +260,7 @@ m_cursorGrabbed(m_fullscreen)
 
     // By default, the OS limits the size of the window the the desktop size,
     // we have to resize it after creation to apply the real size
-    setSize(mode.size);
+    setSize(scaledSize);
 
     // Switch to fullscreen if requested
     if (m_fullscreen)
@@ -289,6 +307,11 @@ WindowImplWin32::~WindowImplWin32()
         // The window is external: remove the hook on its message callback
         SetWindowLongPtrW(m_handle, GWLP_WNDPROC, m_callback);
     }
+
+    if (m_shCoreDll)
+        FreeLibrary(m_shCoreDll);
+    if (m_user32Dll)
+        FreeLibrary(m_user32Dll);
 }
 
 
@@ -475,6 +498,215 @@ void WindowImplWin32::requestFocus()
 bool WindowImplWin32::hasFocus() const
 {
     return m_handle == GetForegroundWindow();
+}
+
+
+////////////////////////////////////////////////////////////
+float WindowImplWin32::getDpiScale() const
+{
+    return m_dpiScale;
+}
+
+
+////////////////////////////////////////////////////////////
+void WindowImplWin32::setProcessDpiAware()
+{
+    assert(!m_user32Dll && !m_shCoreDll);
+    m_user32Dll = LoadLibrary(L"user32.dll");
+    m_shCoreDll = LoadLibrary(L"Shcore.dll");
+
+    // Load some helper function which we may need later for DPI calculations
+    if (m_user32Dll)
+    {
+        // AdjustWindowRectExForDpi is used for calculations when using Per Monitor V2.
+        // GetDpiForWindow is not a necessity, we fall back to GetDpiForMonitor when unavailable.
+        // These functions are available in Windows 10 version 1607 or newer.
+        m_adjustWindowRectExForDpiFunc = reinterpret_cast<AdjustWindowRectExForDpiFuncType>(
+            reinterpret_cast<void*>(GetProcAddress(m_user32Dll, "AdjustWindowRectExForDpi")));
+        m_getDpiForWindowFunc = reinterpret_cast<GetDpiForWindowFuncType>(
+            reinterpret_cast<void*>(GetProcAddress(m_user32Dll, "GetDpiForWindow")));
+    }
+    if (m_shCoreDll)
+    {
+        // We need GetDpiForMonitor to figure out the correct size of the window when
+        // creating it with HighDPI support or when GetDpiForWindow is unavailable.
+        // GetDpiForMonitor is available in Windows 8.1 or newer.
+        m_getDpiForMonitorFunc = reinterpret_cast<GetDpiForMonitorFuncType>(
+            reinterpret_cast<void*>(GetProcAddress(m_shCoreDll, "GetDpiForMonitor")));
+    }
+
+    // Try enabling Per Monitor V2 DPI awareness using SetProcessDpiAwarenessContext first.
+    // SetProcessDpiAwarenessContext is only supported on Windows 10 version 1703 or newer.
+    if (m_user32Dll)
+    {
+        // The function parameter actually has type DPI_AWARENESS_CONTEXT instead of void*,
+        // but DPI_AWARENESS_CONTEXT is declared as a kind of HANDLE and the value passed
+        // to the function is actually an integer. So the exact pointer type is not important.
+        using SetProcessDpiAwarenessContextFuncType = BOOL(WINAPI*)(void*);
+        auto setProcessDpiAwarenessContextFunc      = reinterpret_cast<SetProcessDpiAwarenessContextFuncType>(
+            reinterpret_cast<void*>(GetProcAddress(m_user32Dll, "SetProcessDpiAwarenessContext")));
+
+        // Only set the DPI awareness to Per Monitor V2 if our helper function that are needed
+        // later were also properly loaded. We would need to know in globalOnEvent whether these
+        // helper functions exist, but they are not available there. By only allowing PerMonitorAwareV2
+        // to be used when the helper functions are found, we can simply check if we have V2 in globalOnEvent.
+        // Technically loading the helper functions should never fail when SetProcessDpiAwarenessContext exists.
+        if (setProcessDpiAwarenessContextFunc && m_adjustWindowRectExForDpiFunc && m_getDpiForWindowFunc)
+        {
+            enum class DpiAwarenessContext
+            {
+                Unaware           = -1,
+                SystemAware       = -2,
+                PerMonitorAware   = -3,
+                PerMonitorAwareV2 = -4,
+                UnawareGdiScaled  = -5
+            };
+
+            // When High-DPI scaling is not enabled and the window should keep a constant size across monitors,
+            // then we won't bother with enabling Per Monitor V2 DPI awareness. Enabling V2 would automatically
+            // change the title bar height which forces us to manually recalculate the window size when
+            // receiving the WM_GETDPISCALEDSIZE event. Occationally this event didn't trigger (tested on Windows 21H2),
+            // which caused the window size to suddenly be scaled according to the DPI instead of remaining constant.
+            // Per Monitor V1 doesn't have this issue, and it makes sense to not scale the title when not scaling the window.
+            // With High-DPI scaling we will use V2, but missing the WM_GETDPISCALEDSIZE event would result in
+            // the window size changing by just a few pixels.
+            const auto dpiMode = m_scaleWithDpi ? DpiAwarenessContext::PerMonitorAwareV2
+                                                : DpiAwarenessContext::PerMonitorAware;
+
+            if (!setProcessDpiAwarenessContextFunc(reinterpret_cast<void*>(static_cast<std::ptrdiff_t>(dpiMode))))
+                sf::err() << "Failed to set process DPI awareness with SetProcessDpiAwarenessContext" << std::endl;
+            else
+            {
+                if (m_scaleWithDpi)
+                    m_dpiAwareness = DpiAwareness::PerMonitorAwareV2;
+                else
+                {
+                    m_dpiAwareness = DpiAwareness::PerMonitorAwareV1;
+
+                    // If we aren't using PerMonitorAwareV2 then we don't need to keep the User32.dll available the whole time
+                    FreeLibrary(m_user32Dll);
+                    m_user32Dll = nullptr;
+                }
+                return;
+            }
+        }
+
+        // If SetProcessDpiAwarenessContext doesn't exist then we don't need to keep the user32.dll available the whole time
+        m_adjustWindowRectExForDpiFunc = nullptr;
+        m_getDpiForWindowFunc          = nullptr;
+
+        FreeLibrary(m_user32Dll);
+        m_user32Dll = nullptr;
+    }
+
+    // Try enabling Per Monitor DPI awareness using SetProcessDpiAwareness
+    // if SetProcessDpiAwarenessContext is not available on this system.
+    // SetProcessDpiAwareness is only supported on Windows 8.1 and newer.
+    if (m_shCoreDll)
+    {
+        enum ProcessDpiAwareness
+        {
+            ProcessDpiUnaware         = 0,
+            ProcessSystemDpiAware     = 1,
+            ProcessPerMonitorDpiAware = 2
+        };
+
+        using SetProcessDpiAwarenessFuncType = HRESULT(WINAPI*)(ProcessDpiAwareness);
+        auto setProcessDpiAwarenessFunc      = reinterpret_cast<SetProcessDpiAwarenessFuncType>(
+            reinterpret_cast<void*>(GetProcAddress(m_shCoreDll, "SetProcessDpiAwareness")));
+
+        if (setProcessDpiAwarenessFunc)
+        {
+            // We only check for E_INVALIDARG because we would get
+            // E_ACCESSDENIED if the DPI was already set previously
+            // and S_OK means the call was successful
+            if (setProcessDpiAwarenessFunc(ProcessPerMonitorDpiAware) == E_INVALIDARG)
+            {
+                sf::err() << "Failed to set process DPI awareness with SetProcessDpiAwareness" << std::endl;
+            }
+            else
+            {
+                m_dpiAwareness = DpiAwareness::PerMonitorAwareV1;
+                return;
+            }
+        }
+
+        // If SetProcessDpiAwareness doesn't exist then we don't need to keep the shcore.dll available the whole time
+        m_getDpiForMonitorFunc = nullptr;
+        FreeLibrary(m_shCoreDll);
+        m_shCoreDll = nullptr;
+    }
+
+    // Fall back to enabling System DPI awareness using SetProcessDPIAware
+    // if SetProcessDpiAwareness is not available on this system.
+    // SetProcessDPIAware is only supported on Windows Vista and newer.
+    HINSTANCE user32Dll = LoadLibrary(L"user32.dll");
+
+    if (user32Dll)
+    {
+        using SetProcessDPIAwareFuncType = BOOL(WINAPI*)();
+        auto setProcessDPIAwareFunc      = reinterpret_cast<SetProcessDPIAwareFuncType>(
+            reinterpret_cast<void*>(GetProcAddress(user32Dll, "SetProcessDPIAware")));
+
+        if (setProcessDPIAwareFunc)
+        {
+            if (!setProcessDPIAwareFunc())
+                sf::err() << "Failed to set process DPI awareness with SetProcessDPIAware" << std::endl;
+            else
+            {
+                m_dpiAwareness = DpiAwareness::SystemAware;
+                FreeLibrary(user32Dll);
+                return;
+            }
+        }
+
+        FreeLibrary(user32Dll);
+    }
+
+    m_dpiAwareness = DpiAwareness::Unaware;
+}
+
+
+////////////////////////////////////////////////////////////
+UINT WindowImplWin32::GetWindowDPI() const
+{
+    // Use GetDpiForWindow on Windows 10 version 1607 or newer
+    if (m_getDpiForWindowFunc)
+    {
+        const UINT dpi = m_getDpiForWindowFunc(m_handle);
+        if (dpi != 0)
+            return dpi;
+    }
+
+    // Use GetDpiForMonitor on Windows 8.1 or newer
+    if (m_getDpiForMonitorFunc)
+    {
+        UINT           dpiX;
+        UINT           dpiY;
+        const HMONITOR monitor = MonitorFromWindow(m_handle, MONITOR_DEFAULTTONEAREST);
+        if (m_getDpiForMonitorFunc(monitor, MDTEffectiveDpi, &dpiX, &dpiY) == S_OK)
+            return dpiY; // dpiX and dpiY are always identical
+    }
+
+    // When the DPI of the monitor can't be found then fall back to system DPI
+    return GetSystemDPI();
+}
+
+
+////////////////////////////////////////////////////////////
+UINT WindowImplWin32::GetSystemDPI() const
+{
+    const HDC hdc = GetDC(nullptr);
+    if (hdc)
+    {
+        int dpi = GetDeviceCaps(hdc, LOGPIXELSY);
+        ReleaseDC(NULL, hdc);
+        if (dpi > 0)
+            return static_cast<UINT>(dpi);
+    }
+
+    // Return the DPI that corresponds to 100% scaling in the unlikely event that GetDC fails
+    return 96;
 }
 
 
@@ -1011,6 +1243,108 @@ void WindowImplWin32::processEvent(UINT message, WPARAM wParam, LPARAM lParam)
 
             break;
         }
+
+        // Window dimension change event (Per Monitor v2 DPI awareness, Windows 10 version 1703 or newer)
+        case WM_GETDPISCALEDSIZE:
+        {
+            // If we used Per Monitor V2 as DPI awareness mode then the non-client area portions
+            // of the window (e.g. the title bar) will automatically be scaled.
+            // This causes the ratio of the client area to change when switching monitor,
+            // as Windows scales the entire window (including decorations) linearly instead of
+            // just scaling the client area linearly.
+            // So we manually calculate the window size to scale the contents properly.
+            if ((m_dpiAwareness == DpiAwareness::PerMonitorAwareV2) && m_adjustWindowRectExForDpiFunc &&
+                m_getDpiForWindowFunc)
+            {
+                const DWORD style      = GetWindowLong(m_handle, GWL_STYLE);
+                const DWORD exStyle    = m_fullscreen ? WS_EX_APPWINDOW : 0;
+                const BOOL  menu       = (GetMenu(m_handle) != NULL);
+                const UINT  prevDPI    = m_getDpiForWindowFunc(m_handle);
+                const UINT  nextDPI    = static_cast<UINT>(wParam);
+                SIZE*       windowSize = reinterpret_cast<SIZE*>(lParam);
+
+                // Subtract the window decoration from the window size,
+                // using the old DPI as the window hasn't been rescaled yet.
+                RECT source = {0};
+                m_adjustWindowRectExForDpiFunc(&source, style, FALSE, exStyle, prevDPI);
+                windowSize->cx -= -source.left + source.right;
+                windowSize->cy -= -source.top + source.bottom;
+
+                // We now have the size of the client area, rescale it to the new DPI
+                if (m_scaleWithDpi)
+                {
+                    const float dpiScale = static_cast<float>(nextDPI) / static_cast<float>(prevDPI);
+                    windowSize->cx       = static_cast<LONG>(std::round(windowSize->cx * dpiScale));
+                    windowSize->cy       = static_cast<LONG>(std::round(windowSize->cy * dpiScale));
+                }
+
+                // Add the window decoration that will be present with the new DPI
+                // to get the total window size.
+                RECT target = {0};
+                m_adjustWindowRectExForDpiFunc(&target, style, menu, exStyle, nextDPI);
+                windowSize->cx += -target.left + target.right;
+                windowSize->cy += -target.top + target.bottom;
+            }
+
+            break;
+        }
+
+        // DPI change event (Windows 8.1 or newer)
+        case WM_DPICHANGED:
+        {
+            const float prevDpiScale = m_dpiScale;
+            m_dpiScale               = static_cast<float>(LOWORD(wParam)) / 96.f;
+
+            // Changing the DPI of a monitor containing a fullscreen window was not tested,
+            // we currently just ignore the event in such a case.
+            if (m_fullscreen)
+                break;
+
+            // When using PerMonitorAwareV2, we should have already received a WM_GETDPISCALEDSIZE event
+            // that calculated the new window size, so we don't need any calculations here.
+            // Note that during tested on Windows 21H2 it occationally happened that the WM_GETDPISCALEDSIZE
+            // wasn't received and the code below scales the window linearly based on its total size
+            // including decorations, as opposed to keeping the aspect ratio of the client area.
+            // Apparently WM_DPICHANGED can also be received by a call to SetWindowPos in SFML, so we
+            // would need to ignore this event in such case, but this did not occur yet during testing.
+            if (m_dpiAwareness == DpiAwareness::PerMonitorAwareV2)
+            {
+                // Resize the window to its new size
+                const RECT* suggestedRect = (RECT*)lParam;
+                SetWindowPos(m_handle,
+                             nullptr,
+                             suggestedRect->left,
+                             suggestedRect->top,
+                             suggestedRect->right - suggestedRect->left,
+                             suggestedRect->bottom - suggestedRect->top,
+                             SWP_NOACTIVATE | SWP_NOZORDER);
+            }
+            else if (m_scaleWithDpi)
+            {
+                // When using PerMonitorAwareV1 or SystemAware scaling, scale the window if the
+                // user wanted high DPI support.
+                const DWORD style    = GetWindowLong(m_handle, GWL_STYLE);
+                const BOOL  menu     = (GetMenu(m_handle) != NULL);
+                const float dpiScale = m_dpiScale / prevDpiScale;
+
+                RECT target   = {0};
+                target.right  = static_cast<LONG>(std::round(m_lastSize.x * dpiScale));
+                target.bottom = static_cast<LONG>(std::round(m_lastSize.y * dpiScale));
+                AdjustWindowRectEx(&target, style, menu, 0);
+
+                const Vector2i windowSize    = {target.right - target.left, target.bottom - target.top};
+                const RECT*    suggestedRect = (RECT*)lParam;
+                SetWindowPos(m_handle,
+                             nullptr,
+                             suggestedRect->left,
+                             suggestedRect->top,
+                             windowSize.x,
+                             windowSize.y,
+                             SWP_NOACTIVATE | SWP_NOZORDER);
+            }
+
+            break;
+        }
     }
 }
 
@@ -1159,6 +1493,10 @@ LRESULT CALLBACK WindowImplWin32::globalOnEvent(HWND handle, UINT message, WPARA
     {
         window->processEvent(message, wParam, lParam);
 
+        // Don't forward the WM_GETDPISCALEDSIZE message when we reacted by changing the window size
+        if ((message == WM_GETDPISCALEDSIZE) && (m_dpiAwareness == DpiAwareness::PerMonitorAwareV2))
+            return 1;
+
         if (window->m_callback)
             return CallWindowProcW(reinterpret_cast<WNDPROC>(window->m_callback), handle, message, wParam, lParam);
     }
@@ -1173,6 +1511,11 @@ LRESULT CALLBACK WindowImplWin32::globalOnEvent(HWND handle, UINT message, WPARA
 
     return DefWindowProcW(handle, message, wParam, lParam);
 }
+
+////////////////////////////////////////////////////////////
+// Static member data
+////////////////////////////////////////////////////////////
+WindowImplWin32::DpiAwareness WindowImplWin32::m_dpiAwareness = DpiAwareness::Unaware;
 
 } // namespace priv
 

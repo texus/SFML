@@ -57,9 +57,10 @@ public:
     ///
     /// \param modeSize         Width and height in pixels
     /// \param modeBitsPerPixel Pixel depths in bits per pixel
+    /// \param highDpi          Automatically change the window size based on the monitor scaling on Windows
     ///
     ////////////////////////////////////////////////////////////
-    explicit VideoMode(const Vector2u& modeSize, unsigned int modeBitsPerPixel = 32);
+    explicit VideoMode(const Vector2u& modeSize, unsigned int modeBitsPerPixel = 32, bool highDpi = false);
 
     ////////////////////////////////////////////////////////////
     /// \brief Get the current desktop video mode
@@ -102,6 +103,7 @@ public:
     ////////////////////////////////////////////////////////////
     Vector2u     size;         //!< Video mode width and height, in pixels
     unsigned int bitsPerPixel; //!< Video mode pixel depth, in bits per pixels
+    bool         scaleWithDpi; //!< Automatically change the window size based on the monitor scaling on Windows
 };
 
 ////////////////////////////////////////////////////////////

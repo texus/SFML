@@ -392,6 +392,16 @@ public:
     bool hasFocus() const;
 
     ////////////////////////////////////////////////////////////
+    /// \brief Get the DPI scale factor of the window
+    ///
+    /// Currently this is only supported on Window, other platforms always return 1.
+    ///
+    /// \return Scaling factor of the window. Always 1 (which is 100%) when not scaling to monitor.
+    ///
+    ////////////////////////////////////////////////////////////
+    float getDpiScale() const;
+
+    ////////////////////////////////////////////////////////////
     /// \brief Get the OS-specific handle of the window
     ///
     /// The type of the returned handle is sf::WindowHandle,

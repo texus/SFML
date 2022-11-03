@@ -183,6 +183,14 @@ public:
     ////////////////////////////////////////////////////////////
     bool hasFocus() const override;
 
+    ////////////////////////////////////////////////////////////
+    /// \brief Get the DPI scale factor of the window
+    ///
+    /// \return Scaling factor of the window. Always 1 (which is 100%) when not scaling to monitor.
+    ///
+    ////////////////////////////////////////////////////////////
+    float getDpiScale() const override;
+
 protected:
     ////////////////////////////////////////////////////////////
     /// \brief Process incoming events from the operating system
@@ -191,8 +199,48 @@ protected:
     void processEvents() override;
 
 private:
+    enum MonitorDpiType
+    {
+        MDTEffectiveDpi = 0,
+        MDTAngularDpi   = 1,
+        MDTRawDpi       = 2
+    };
+    using AdjustWindowRectExForDpiFuncType = BOOL(WINAPI*)(LPRECT, DWORD, BOOL, DWORD, UINT);
+    using GetDpiForWindowFuncType          = UINT(WINAPI*)(HWND);
+    using GetDpiForMonitorFuncType         = HRESULT(WINAPI*)(HMONITOR, MonitorDpiType, UINT*, UINT*);
+
     ////////////////////////////////////////////////////////////
-    /// Register the window class
+    /// \brief Process DPI awareness mode
+    ///
+    ////////////////////////////////////////////////////////////
+    enum class DpiAwareness
+    {
+        Unaware,
+        SystemAware,
+        PerMonitorAwareV1,
+        PerMonitorAwareV2
+    };
+
+    ////////////////////////////////////////////////////////////
+    /// \brief Sets the process DPI awareness mode to the best available mode
+    ///
+    ////////////////////////////////////////////////////////////
+    void setProcessDpiAware();
+
+    ////////////////////////////////////////////////////////////
+    /// \brief Returns the DPI of the monitor on which the window is located
+    ///
+    ////////////////////////////////////////////////////////////
+    UINT GetWindowDPI() const;
+
+    ////////////////////////////////////////////////////////////
+    /// \brief Returns the DPI of the main monitor
+    ///
+    ////////////////////////////////////////////////////////////
+    UINT GetSystemDPI() const;
+
+    ////////////////////////////////////////////////////////////
+    /// \brief Register the window class
     ///
     ////////////////////////////////////////////////////////////
     void registerWindowClass();
@@ -281,6 +329,18 @@ private:
     bool          m_mouseInside;   //!< Mouse is inside the window?
     bool          m_fullscreen;    //!< Is the window fullscreen?
     bool          m_cursorGrabbed; //!< Is the mouse cursor trapped?
+    bool          m_scaleWithDpi;  //!< Should the window change size when moved to a monitor with a different DPI?
+    float         m_dpiScale;      //!< DPI scale factor
+    HINSTANCE m_user32Dll; //!< Handle to user32.dll to use AdjustWindowRectExForDpi and GetDpiForWindow (added in Windows 10 version 1607)
+    HINSTANCE m_shCoreDll; //!< Handle to shcore.dll to useGetDpiForMonitor (added in Windows 8.1)
+    AdjustWindowRectExForDpiFuncType m_adjustWindowRectExForDpiFunc; // Handle to the AdjustWindowRectExForDpi function in user32.dll
+    GetDpiForWindowFuncType  m_getDpiForWindowFunc;  // Handle to the GetDpiForWindow function in user32.dll
+    GetDpiForMonitorFuncType m_getDpiForMonitorFunc; // Handle to the GetDpiForMonitor function in shcore.dll
+
+    ////////////////////////////////////////////////////////////
+    // Static member data
+    ////////////////////////////////////////////////////////////
+    static DpiAwareness m_dpiAwareness; //!< DPI awareness mode (per monitor, system aware or unaware)
 };
 
 } // namespace priv

@@ -35,15 +35,16 @@
 namespace sf
 {
 ////////////////////////////////////////////////////////////
-VideoMode::VideoMode() : size(0, 0), bitsPerPixel(0)
+VideoMode::VideoMode() : size(0, 0), bitsPerPixel(0), scaleWithDpi(false)
 {
 }
 
 
 ////////////////////////////////////////////////////////////
-VideoMode::VideoMode(const Vector2u& modeSize, unsigned int modeBitsPerPixel) :
+VideoMode::VideoMode(const Vector2u& modeSize, unsigned int modeBitsPerPixel, bool highDpi) :
 size(modeSize),
-bitsPerPixel(modeBitsPerPixel)
+bitsPerPixel(modeBitsPerPixel),
+scaleWithDpi(highDpi)
 {
 }
 

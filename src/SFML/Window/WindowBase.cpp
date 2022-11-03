@@ -300,6 +300,13 @@ bool WindowBase::hasFocus() const
 
 
 ////////////////////////////////////////////////////////////
+float WindowBase::getDpiScale() const
+{
+    return m_impl ? m_impl->getDpiScale() : 1.f;
+}
+
+
+////////////////////////////////////////////////////////////
 WindowHandle WindowBase::getSystemHandle() const
 {
     return m_impl ? m_impl->getSystemHandle() : WindowHandle{};

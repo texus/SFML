@@ -183,6 +183,14 @@ bool WindowImpl::popEvent(Event& event, bool block)
 
 
 ////////////////////////////////////////////////////////////
+float WindowImpl::getDpiScale() const
+{
+    // Implementations which don't override this function all have 100% scaling
+    return 1;
+}
+
+
+////////////////////////////////////////////////////////////
 void WindowImpl::pushEvent(const Event& event)
 {
     m_events.push(event);

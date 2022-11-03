@@ -241,6 +241,16 @@ public:
     virtual bool hasFocus() const = 0;
 
     ////////////////////////////////////////////////////////////
+    /// \brief Get the DPI scale factor of the window
+    ///
+    /// Currently this is only supported on Window, other platforms always return 1.
+    ///
+    /// \return Scaling factor of the window. Always 1 (which is 100%) when not scaling to monitor.
+    ///
+    ////////////////////////////////////////////////////////////
+    virtual float getDpiScale() const;
+
+    ////////////////////////////////////////////////////////////
     /// \brief Create a Vulkan rendering surface
     ///
     /// \param instance  Vulkan instance
