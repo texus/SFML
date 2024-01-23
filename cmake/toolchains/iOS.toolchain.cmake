@@ -123,7 +123,7 @@ else ()
 endif ()
 
 # Setup iOS developer location unless specified manually with IOS_DEVELOPER_ROOT
-execute_process(COMMAND /usr/bin/xcode-select -print-path OUTPUT_VARIABLE XCODE_DEVELOPER_DIR)
+execute_process(COMMAND /usr/bin/xcode-select -print-path OUTPUT_VARIABLE XCODE_DEVELOPER_DIR OUTPUT_STRIP_TRAILING_WHITESPACE)
 set (IOS_DEVELOPER_ROOT "${XCODE_DEVELOPER_DIR}/Platforms/${IOS_PLATFORM_LOCATION}/Developer" CACHE PATH "Location of iOS Platform")
 
 # Find and use the most recent iOS sdk unless specified manually with IOS_SDK_ROOT
