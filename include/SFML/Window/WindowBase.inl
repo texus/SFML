@@ -41,7 +41,9 @@ struct OverloadSet : Ts...
 {
     using Ts::operator()...;
 #if defined(_MSC_VER) && !defined(__clang__)
-    unsigned char dummy; // Dummy variable to ensure that this struct is not empty thus avoiding a crash due to an MSVC bug
+    // Dummy variable to ensure that this struct is not empty thus avoiding a crash due to an MSVC bug.
+    // The variable must be explicitly initialized to avoid another case where it would otherwise crash.
+    unsigned char dummy = 0;
 #endif
 };
 template <typename... Ts>
